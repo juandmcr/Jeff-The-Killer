@@ -2,7 +2,7 @@
 # - * - * - * - * - * - * - * - * - * - * - * - * - #
 #                   CONSTS & CONFIG                 #
 # - * - * - * - * - * - * - * - * - * - * - * - * - #
-VERSION="1.0.1"
+VERSION="1.0.2"
 SettingsPath="$HOME/.config/JeffTheKiller"
 SettingsFile="$HOME/.config/JeffTheKiller/settings.conf"
 
@@ -33,10 +33,10 @@ declare -A descriptions=(
   [CHECK_AGAIN_EVERY]="Time interval (in seconds) to re-check for inactivity when you're active or audio is playing. Lower values are more responsive."
   [ENABLE_SCREEN_LOCK]="Enable screen locking before system sleep. If true, your screen locker will run before suspension."
   [SCREEN_LOCK_COMMAND]="Screen locker command. Make sure this command exists and works on your system (e.g., i3lock, slock, dm-tool lock)."
-  [ENABLE_SCREEN_SAVER]="Enable screen power management. If true, your screen will turn off after specified idle time. This is Jeff's built-in screen saver."
+  [ENABLE_SCREEN_SAVER]="Enable screen power management. If true, your screen will turn off after specified idle time."
   [SCREEN_SAVER_AFTER]="Minutes of inactivity before screen turns off. 0 uses default (10 minutes). Only works if ENABLE_SCREEN_SAVER is true."
   [SCREEN_SAVER_WITH_AUDIO]="Allow screen to sleep even when audio is active. NOT recommended for media consumption! Use false unless you have specific needs."
-  [SUSPEND_MODE]="Method to suspend system: 'dbus' (recommended, no root needed) or 'systemctl' (requires polkit rule, see README.md)."
+  [SUSPEND_MODE]="Method to suspend system: 'dbus' (recommended, no sudo) or 'systemctl' (requires polkit rule, see README.md)."
 )
 
 
