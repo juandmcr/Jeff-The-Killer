@@ -1,0 +1,16 @@
+[Unit]
+Description=Jeff The Killer - Sleep Manager
+After=graphical-session.target
+After=pulseaudio.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+ExecStartPre=/bin/sleep 5
+ExecStart=%h/.local/bin/jeffthekiller --daemon
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

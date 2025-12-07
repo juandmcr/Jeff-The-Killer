@@ -1,0 +1,773 @@
+#!/bin/bash
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                   CONSTS & CONFIG                 #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+VERSION=1.0.1
+SettingsPath="$HOME/.config/JeffTheKiller"
+SettingsFile="$HOME/.config/JeffTheKiller/settings.conf"
+
+declare -a settingsOrder=(
+  "MAX_IDLE_TIME"
+  "CHECK_AGAIN_EVERY"
+  "ENABLE_SCREEN_SAVER"
+  "SCREEN_SAVER_AFTER"
+  "SCREEN_SAVER_WITH_AUDIO"
+  "ENABLE_SCREEN_LOCK"
+  "SCREEN_LOCK_COMMAND"
+  "SUSPEND_MODE"
+)
+
+declare -A settings=(
+  [MAX_IDLE_TIME]=17 #minutes
+  [CHECK_AGAIN_EVERY]=15 #seconds
+  [ENABLE_SCREEN_LOCK]=false
+  [SCREEN_LOCK_COMMAND]="i3lock-fancy"
+  [ENABLE_SCREEN_SAVER]=true
+  [SCREEN_SAVER_AFTER]=0 #minutes | 0 = default = 10 mins
+  [SCREEN_SAVER_WITH_AUDIO]=false
+  [SUSPEND_MODE]="dbus"
+)
+
+declare -A descriptions=(
+  [MAX_IDLE_TIME]="Max. AFK Time in minutes to be considered as idle"
+  [CHECK_AGAIN_EVERY]="If not AFK and/or audio is active, check again for inactivity in X seconds"
+  [ENABLE_SCREEN_LOCK]="TRUE = Lock screen after sleep; FALSE = Don't"
+  [SCREEN_LOCK_COMMAND]="Command you use to lock your screen with your screen locker."
+  [ENABLE_SCREEN_SAVER]="TRUE = Screen sleeps after some time AFK; FALSE = Screen never sleeps"
+  [SCREEN_SAVER_AFTER]="If enableScreenSaver=true screen will sleep after X minutes AFK; 0 for default"
+  [SCREEN_SAVER_WITH_AUDIO]="TRUE = if enableScreenSaver=true screen will sleep even if audio is active (The screen will go to sleep even while watching youtube, so FALSE recommended!)"
+  [SUSPEND_MODE]="'dbus' (recommended) or 'systemctl' (requires polkit rule, information in the README.md)"
+)
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                   Utilities                       #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+clearScreen() {
+  printf "\033[2J\033[1;1H"
+}
+
+printHeader() {
+  clearScreen
+  echo "╔══════════════════════════════════════════════════════════╗"
+  echo "║               JEFF THE KILLER - Sleep Manager            ║"
+  echo "║                     Version $VERSION                        ║"
+  echo "╚══════════════════════════════════════════════════════════╝"
+  echo ""
+}
+
+printFooter() {
+  echo ""
+  echo "╔══════════════════════════════════════════════════════════╗"
+  echo "║   Press Ctrl+C to exit at any time                       ║"
+  echo "╚══════════════════════════════════════════════════════════╝"
+  echo ""
+}
+
+pause() {
+  read -r -p "Press Enter to continue..."
+}
+
+toLower() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+toUpper() {
+  echo "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+isNumber() {
+  local input=$1
+  [[ -n "$input" && "$input" =~ ^[0-9]+$ ]]
+}
+
+msToMin() {
+  local ms=$1
+  local seconds=$((ms / 1000))
+  local minutes=$((seconds / 60))
+  echo $minutes
+}
+
+trim() {
+  local var="$*"
+  var="${var#"${var%%[![:space:]]*}"}"
+  var="${var%"${var##*[![:space:]]}"}"
+  echo -n "$var"
+}
+
+settingExists() {
+  local key="$1"
+  [[ -n "${settings[$key]+x}" ]]
+}
+
+uninstallFiles(){
+  clearScreen
+  echo "Uninstalling JeffTheKiller's files..."
+
+  systemctl --user stop gotosleep.service 2>/dev/null
+  systemctl --user disable gotosleep.service 2>/dev/null
+
+  pkill -f "jeffthekiller --daemon" 2>/dev/null
+
+  echo "Killing $HOME/.local/bin/jeffthekiller"
+  rm "$HOME/.local/bin/jeffthekiller" 2>/dev/null
+  echo "Killing $SettingsFile"
+  rm "$SettingsFile" 2>/dev/null
+  echo "Killing $HOME/.config/systemd/user/gotosleep.service"
+  rm "$HOME/.config/systemd/user/gotosleep.service" 2>/dev/null
+
+  systemctl --user daemon-reload 2>/dev/null
+
+  echo ""
+  read -r -p "Restart PulseAudio to avoid audio issues? (y/n): " restart_pulse
+  if [ "$(toLower "$restart_pulse")" = "y" ]; then
+    echo "Restarting PulseAudio..."
+    systemctl --user restart pulseaudio.service 2>/dev/null || pulseaudio -k 2>/dev/null
+    echo "PulseAudio restarted. You may need to restart your applications for audio to work properly."
+  else
+    echo "Skipping PulseAudio restart. If you experience audio issues, try restarting PulseAudio manually."
+  fi
+
+  echo ""
+  echo "Note: If you installed the polkit rule for systemd suspension mode you may need to remove it yourself:"
+  echo "sudo rm /etc/polkit-1/rules.d/85-suspend-no-auth.rules"
+  echo ""
+  echo "All Jeff The Killer's installed with the Install Wizard have been uninstalled from your system. Now you can Go To Sleep."
+}
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                   funcs for config                #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+loadSettings() {
+  if [[ -f $SettingsFile ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ -z "${line// /}" ]] && continue
+      [[ "${line##\#*}" != "$line" ]] && continue
+
+      key="${line%%=*}"
+      value="${line#*=}"
+
+      key="$(trim "$key")"
+      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+        value="${value:1:-1}"
+      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:-1}"
+      fi
+      value="$(trim "$value")"
+
+      if settingExists "$key"; then
+        settings["$key"]="$value"
+      fi
+    done < "$SettingsFile"
+  else
+    echo "No Settings File found at"
+    echo "$SettingsPath"
+    echo "Default settings will be used."
+  fi
+
+  local m="${settings[SCREEN_SAVER_AFTER]}"
+  if [[ "${settings[ENABLE_SCREEN_SAVER]}" == "true" ]] && isNumber "$m" && [ "$m" -ne 0 ]; then
+    local s=$((m * 60))
+    xset dpms $s $s $s 2>/dev/null
+  elif isNumber "$m" && [ "$m" -eq 0 ]; then
+    xset dpms 600 600 600 2>/dev/null
+  else
+    xset dpms 600 600 600 2>/dev/null
+  fi
+}
+
+
+saveSettings() {
+  mkdir -p "$SettingsPath" 2>/dev/null
+  {
+    for key in "${settingsOrder[@]}"
+    do
+      val="${settings[$key]}"
+      printf '%s="%s"\n' "$key" "${val//\"/\\\"}"
+    done
+  } > "$SettingsFile"
+}
+
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                   Main Logic Funcs                #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+isAudioActive() {
+  for i in {1..3}
+  do
+    if pactl list sinks short 2>/dev/null | grep -q RUNNING; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+isAFK() {
+  local currentIdleTime=$(xprintidle 2>/dev/null || echo 0)
+  local idleMinutes=$(msToMin "$currentIdleTime")
+  local maxIdle=${settings[MAX_IDLE_TIME]}
+
+  if ! isNumber "$maxIdle"; then
+    maxIdle=17
+  fi
+
+  [ "$idleMinutes" -ge "$maxIdle" ]
+  return $?
+}
+
+CHANGExsetBehaviour() {
+  if [[ "${settings[ENABLE_SCREEN_SAVER]}" == "true" ]]; then
+    if isAudioActive && [[ "${settings[SCREEN_SAVER_WITH_AUDIO]}" == "false" ]]; then
+      sleep 0.5
+      xset s off -dpms 2>/dev/null
+    else
+      if isAFK; then
+        sleep 0.5
+        xset s on +dpms 2>/dev/null
+      else
+        sleep 0.5
+        xset s off -dpms 2>/dev/null
+      fi
+    fi
+  else
+    sleep 0.5
+    xset s off -dpms 2>/dev/null
+  fi
+}
+
+
+checkAgain() {
+  CHANGExsetBehaviour
+
+  local time="${settings[CHECK_AGAIN_EVERY]}"
+  if ! isNumber "$time"; then
+    time=15
+  fi
+
+  sleep $time
+}
+
+goToSleep() {
+  if [[ "${settings[ENABLE_SCREEN_LOCK]}" == "true" ]] ; then
+    if [[ -n "${settings[SCREEN_LOCK_COMMAND]}" ]]; then
+        read -r -a lock_cmd <<< "${settings[SCREEN_LOCK_COMMAND]}"
+        "${lock_cmd[@]}" 2>/dev/null || echo "Warning: screen lock command failed: ${lock_cmd[0]}"
+    fi
+  fi
+
+  local mode=$(toLower "${settings[SUSPEND_MODE]}")
+  if [ "$mode" = "dbus" ]; then
+    if ! dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.Suspend boolean:true 2>/dev/null; then
+      echo "Error: dbus-send failed. Trying fallback to systemctl..." >&2
+      if ! systemctl suspend; then
+        echo "Error: Could not suspend system. You may need to install the polkit rule or switch to 'dbus' mode." >&2
+      fi
+    fi
+  elif [ "$mode" = "systemctl" ]; then
+    if ! systemctl suspend; then
+      echo "Error: systemctl suspend failed. Ensure you have installed the polkit rule (85-suspend-no-auth.rules)." >&2
+    fi
+  else
+    echo "Error: Unknown SUSPEND_MODE '${settings[SUSPEND_MODE]}'. Using dbus as fallback." >&2
+    dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.Suspend boolean:true 2>/dev/null
+  fi
+
+  sleep 30
+}
+
+mainLoop() {
+  sleep 10
+  if ! command -v xprintidle &>/dev/null; then
+    echo "xprintidle seems to be missing or not installed, it is a very important dependency."
+    echo "Please, install it using:"
+    echo "sudo apt install xprintidle"
+    echo "and try again."
+    exit 1
+  fi
+
+  while ! pactl info &>/dev/null
+  do
+    sleep 1
+  done
+
+  while :
+  do
+    if isAudioActive || ! isAFK ; then
+      checkAgain
+    else
+      goToSleep
+    fi
+  done
+}
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                      VISUALS                      #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+wrapDescriptionBox() {
+  local description="$1"
+  local width=56
+  local processed_desc=""
+
+  description=$(echo -e "$description")
+
+  IFS=' ' read -ra words <<< "$description"
+
+  local current_line=""
+  for word in "${words[@]}"; do
+    if [ $((${#current_line} + ${#word} + 1)) -gt $width ]; then
+      if [ -n "$current_line" ]; then
+        processed_desc+="║ $current_line"
+        # Add padding to reach width
+        local padding=$((width - ${#current_line}))
+        printf -v padding_str "%*s" $padding ""
+        processed_desc+="$padding_str ║\n"
+      fi
+      current_line="$word"
+    else
+      if [ -z "$current_line" ]; then
+        current_line="$word"
+      else
+        current_line+=" $word"
+      fi
+    fi
+  done
+
+  if [ -n "$current_line" ]; then
+    processed_desc+="║ $current_line"
+    local padding=$((width - ${#current_line}))
+    printf -v padding_str "%*s" $padding ""
+    processed_desc+="$padding_str ║"
+  fi
+
+  echo -e "$processed_desc"
+}
+
+updateSetting() {
+  while true; do
+    printHeader
+    echo "Available settings:"
+    echo "╔══════════════════════════════╗╔══════════════════════════╗"
+    for key in "${settingsOrder[@]}"
+    do
+      local value="${settings[$key]}"
+      if [ ${#value} -gt 20 ]; then
+        value="${value:0:20}.."
+      fi
+      printf "║ %-28s ║║ %-24s ║\n" "$key" "$value"
+    done
+    echo "╚══════════════════════════════╝╚══════════════════════════╝"
+    echo ""
+    echo "Enter setting name to modify, 'b' to go back, or press Ctrl+C to exit."
+    echo ""
+
+    read -r -p "Setting name: " sname
+
+    if [[ "$(toLower "$sname")" == "b" ]] || [[ "$sname" == "back" ]]; then
+      return 0
+    fi
+
+    local settingName=$(toUpper "$sname")
+
+    if settingExists "$settingName"; then
+      while true; do
+          printHeader
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║                    UPDATE SETTING                        ║"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║ Setting:   $settingName                                   "
+          echo "║ Current:   ${settings[$settingName]}                      "
+          echo "║                                                          ║"
+          echo "║ Description:                                             ║"
+
+          local description="${descriptions[$settingName]}"
+          wrapped_desc=$(wrapDescriptionBox "$description")
+          echo -e "$wrapped_desc"
+
+          echo "║                                                          ║"
+          echo "╠══════════════════════════════════════════════════════════╣"
+          echo "║ Enter 'b' to go back, 'c' to cancel, or new value below. ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo ""
+
+        read -r -p "New value (or b/c): " nval
+
+        case "$(toLower "$nval")" in
+          b|back)
+            break
+            ;;
+          c|cancel)
+            return 0
+            ;;
+          *)
+            if [[ -z "$nval" ]]; then
+              printHeader
+              echo "✗ Error: Value cannot be empty!"
+              echo "Please enter a valid value or 'c' to cancel."
+              sleep 2
+              continue
+            fi
+
+            settings["$settingName"]="$nval"
+            saveSettings
+            loadSettings  # Reload settings to update current session
+
+            printHeader
+            echo "✓ Setting '$settingName' successfully updated to: $nval"
+            echo ""
+
+            if [ "$settingName" = "SUSPEND_MODE" ] && [ "$(toLower "$nval")" = "systemctl" ]; then
+              echo "⚠  Note: 'systemctl' mode requires the polkit rule."
+              echo "   Ensure you have placed '85-suspend-no-auth.rules' in /etc/polkit-1/rules.d/"
+              echo ""
+            fi
+
+            read -r -p "Restart service to apply changes now? (y/n): " ans
+            if [ "$(toLower "$ans")" = "y" ]; then
+              systemctl --user restart gotosleep.service
+              echo "✓ Service restarted!"
+              sleep 1
+            else
+              echo "ℹ  Remember to restart the service later with: jeffthekiller -r"
+              sleep 2
+            fi
+
+            read -r -p "Modify another setting? (y/n): " another
+            if [ "$(toLower "$another")" = "y" ]; then
+              break
+            else
+              return 0
+            fi
+            ;;
+        esac
+      done
+    else
+      printHeader
+      echo "✗ Invalid setting name: '$sname'"
+      echo "Please enter a valid setting name from the list above."
+      echo ""
+      read -r -p "Press Enter to continue or 'b' to go back... " choice
+      if [[ "$(toLower "$choice")" == "b" ]]; then
+        return 0
+      fi
+    fi
+  done
+}
+
+showHelp() {
+  printHeader
+  echo "Jeff The Killer - Sleep Manager"
+  echo "===================================="
+  echo "Prevents system sleep while audio is playing AND user is actively using the system."
+  echo "Suspends after ${settings[MAX_IDLE_TIME]} minutes of inactivity without audio."
+  echo ""
+  echo "REQUIREMENTS:"
+  echo "- X11 environment (not Wayland)"
+  echo "- xprintidle (sudo apt install xprintidle)"
+  echo "- PulseAudio (usually preinstalled)"
+  echo ""
+  echo "FILES:"
+  echo "- Script: $0 && $HOME/.local/bin/jeffthekiller"
+  echo "- Settings: $SettingsFile"
+  echo "- Service: $HOME/.config/systemd/user/gotosleep.service"
+  echo "- Optional polkit rule: /etc/polkit-1/rules.d/85-suspend-no-auth.rules"
+  echo "  (Only needed if you use SUSPEND_MODE=systemctl)"
+  echo ""
+  echo "SUSPEND MODES:"
+  echo "- dbus: Uses dbus-send (recommended, no sudo required)"
+  echo "- systemctl: Uses systemctl suspend (requires polkit rule)"
+  echo ""
+  echo "USAGE:"
+  echo "  jeffthekiller           # Start with menu"
+  echo "  jeffthekiller --daemon  # Start directly without menu"
+  echo "  jeffthekiller -d        # Disable systemd service"
+  echo "  jeffthekiller -d X      # Disable for X minutes"
+  echo "  jeffthekiller -r        # Restart systemd service"
+  echo "  jeffthekiller -s        # Show status of systemd service"
+  echo "  jeffthekiller -j        # Show journalctl of systemd service"
+  echo "  jeffthekiller --help    # Show this help"
+  echo ""
+  echo "NOTE: After changing settings, restart the service with: jeffthekiller -r"
+  echo ""
+  echo "Thanks to whoever using this, (me, my mom, my cat and maybe Z.S. :wilted_rose:)"
+  pause
+}
+
+installMenu() {
+  printHeader
+  echo "╔══════════════════════════════════════════════════════════╗"
+  echo "║          JEFF THE KILLER - Installation Wizard           ║"
+  echo "╚══════════════════════════════════════════════════════════╝"
+  echo ""
+  read -r -p "Do you want to install automatically? (y/n): " autoInstall
+
+  if [ "$(toLower "$autoInstall")" = "y" ]; then
+    echo ""
+    echo "Installing..."
+    echo "────────────"
+
+    mkdir -p "$HOME/.config/systemd/user" 2>/dev/null
+    mkdir -p "$SettingsPath" 2>/dev/null
+    mkdir -p "$HOME/.local/bin" 2>/dev/null
+
+    if [ -f "jeffthekiller" ]; then
+      local path="$(pwd)/jeffthekiller"
+      cp "$path" "$HOME/.local/bin/jeffthekiller"
+      chmod +x "$HOME/.local/bin/jeffthekiller" 2>/dev/null
+      echo "✓ Script copied to ~/.local/bin/"
+    else
+      echo "✗ Script file 'jeffthekiller' not found in current directory"
+    fi
+
+    if [ -f "gotosleep.service" ]; then
+      cp "gotosleep.service" "$HOME/.config/systemd/user/"
+      echo "✓ Systemd service installed"
+    else
+      echo "✗ Service file 'gotosleep.service' not found"
+      echo "  No systemd service was created (Check the readme for manual installation)"
+    fi
+
+    if [ -f "85-suspend-no-auth.rules" ]; then
+      echo ""
+      echo "⚠  Polkit rule file found!"
+      echo "   If you plan to use SUSPEND_MODE=systemctl, install it with:"
+      echo "   sudo cp 85-suspend-no-auth.rules /etc/polkit-1/rules.d/"
+      echo "   sudo systemctl restart polkit"
+    fi
+
+    saveSettings
+    echo "✓ Configuration saved"
+
+    systemctl --user daemon-reload
+    systemctl --user enable gotosleep.service 2>/dev/null
+    systemctl --user start gotosleep.service 2>/dev/null
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                 INSTALLATION SUCCEEDED!                  ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "✓ Jeff The Killer and its systemd service are installed"
+    echo "✓ Service will auto-start with your user session"
+    echo ""
+    echo "You can now from everywhere in your system:"
+    echo "• Use 'jeffthekiller' to access this menu"
+    echo "• Use 'jeffthekiller -r' to restart the service"
+    echo "• Use 'jeffthekiller -s' to check service status"
+    echo "• Use 'jeffthekiller -j' to check service's journalctl"
+    echo "• Use 'jeffthekiller -d X' to disable jeffthekiller/gotosleep for X minutes"
+    echo "• Use 'jeffthekiller -d' to disable jeffthekiller/gotosleep completely until restart"
+    echo "• Use 'jeffthekiller -h' to stop it and seek some help and info, etc."
+    echo ""
+  else
+    echo ""
+    echo "Manual installation detected."
+
+    if [ -f "$HOME/.config/systemd/user/gotosleep.service" ]; then
+      echo "Service file found. Creating configuration..."
+      saveSettings
+      echo "✓ Configuration created"
+      echo "✓ You can now access the main menu"
+      pause
+      return 0
+    else
+      echo "Manual installation required. Please check README.md and jeffthekiller --help."
+      echo "Or run the installation again and select 'y' for automatic installation."
+      pause
+      exit 1
+    fi
+  fi
+  pause
+}
+
+showMenu() {
+  loadSettings
+
+  if [[ -f $SettingsFile ]]; then
+    while :
+    do
+      printHeader
+      printFooter
+      echo "╔══════════════════════════════════════════════════════════╗"
+      echo "║                      MAIN MENU                           ║"
+      echo "╠══════════════════════════════════════════════════════════╣"
+      echo "║ 1) Edit settings                                         ║"
+      echo "║ 2) Help                                                  ║"
+      echo "║ 3) Launch in terminal (without systemd service)          ║"
+      echo "║ 4) Exit and start systemd service                        ║"
+      echo "║ 5) Exit                                                  ║"
+      echo "║ 6) Uninstall and exit                                    ║"
+      echo "╚══════════════════════════════════════════════════════════╝"
+      echo ""
+      read -r -p "Select an option (1-6): " option
+
+      case "$option" in
+        1)
+          updateSetting
+          ;;
+        2)
+          showHelp
+          ;;
+        3)
+          printHeader
+          printFooter
+          echo "Starting Jeff The Killer in the terminal..."
+          echo "Press Ctrl+C to stop and return to menu"
+          echo ""
+          echo "Status: Active"
+          echo "────────────────"
+          loadSettings
+          trap 'echo ""; echo "Returning to menu..."; sleep 2; continue' INT
+          mainLoop
+          ;;
+        4)
+          printHeader
+          echo "Starting systemd service..."
+          systemctl --user start gotosleep.service 2>/dev/null
+          if [ $? -eq 0 ]; then
+            echo "✓ Service started successfully!"
+            echo "✓ It will auto-start with your user session"
+          else
+            echo "✗ Failed to start service"
+            echo "  Make sure the service file is installed"
+          fi
+          pause
+          exit 0
+          ;;
+        5|exit)
+          printHeader
+          echo "Exiting Jeff The Killer >:D"
+          echo ""
+          echo "Remember:"
+          echo "• Use 'jeffthekiller -r' to start/restart the service"
+          echo "• Use 'jeffthekiller' to access this menu again"
+          echo ""
+          exit 0
+          ;;
+        6)
+          read -r -p "Are you sure that you want to uninstall all JeffTheKiller/GoToSleep's Files? (Only affects files installed with the Installation Wizard) [Y/N]: " confirmation
+          case "$confirmation" in
+            y|Y)
+              uninstallFiles
+              echo "Exiting..."
+              exit 0
+              ;;
+            n|N)
+              :
+              ;;
+          esac
+          ;;
+        *)
+          printHeader
+          echo "✗ Invalid option: $option"
+          echo "  Please select a number between 1 and 6"
+          pause
+          ;;
+      esac
+    done
+  else
+    printHeader
+    printFooter
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                FIRST TIME SETUP                          ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    read -r -p "Is this your first time (re-)installing Jeff The Killer in this system? (y/n) " answer
+
+    case "$(toLower "$answer")" in
+      y)
+        installMenu
+        showMenu
+        ;;
+      n)
+        printHeader
+        echo "Settings file not found at:"
+        echo "  $SettingsFile"
+        echo ""
+        echo "This suggests the settings file was moved or deleted."
+        echo ""
+        read -r -p "Do you want to create a new configuration file with default settings? (y/n): " createNew
+
+        if [ "$(toLower "$createNew")" = "y" ]; then
+          saveSettings
+          echo "✓ New configuration created with default settings"
+          echo "✓ Restarting menu..."
+          sleep 2
+          showMenu
+        else
+          echo "Exiting. You can manually restore your settings or run the installation again."
+          exit 1
+        fi
+        ;;
+      *)
+        echo "Invalid answer"
+        exit 1
+        ;;
+    esac
+  fi
+}
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                   argparser                       #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --daemon)
+      shift
+      sleep 10
+      loadSettings
+      mainLoop
+      ;;
+    -d)
+      shift
+      DISABLE_MINUTES=0
+      if isNumber "$1"; then
+        DISABLE_MINUTES=$1
+        shift
+      fi
+      systemctl --user stop gotosleep.service
+      if [ $DISABLE_MINUTES -gt 0 ]; then
+        echo "$(date +%T) USER: Service disabled for $DISABLE_MINUTES minutes"
+        sleep $((DISABLE_MINUTES * 60))
+        systemctl --user start gotosleep.service
+      else
+        echo "$(date +%T) USER: Service disabled permanently (for this session)"
+      fi
+      exit 0
+      ;;
+    -r)
+      shift
+      systemctl --user restart gotosleep.service
+      exit 0
+      ;;
+    -s|--status)
+      shift
+      systemctl --user status gotosleep.service
+      exit 0
+      ;;
+    -j|--journal)
+      shift
+      journalctl --user -u gotosleep -f -q
+      exit 0
+      ;;
+    -h|--help)
+      showHelp
+      exit 0
+      ;;
+    *)
+      echo -e "Unknown argument: $1\nShowing Help:\n---------------\n"
+      showHelp
+      exit 1
+      ;;
+  esac
+done
+
+
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+#                    Main Loop                      #
+# - * - * - * - * - * - * - * - * - * - * - * - * - #
+showMenu
