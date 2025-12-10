@@ -8,6 +8,8 @@ SettingsFile="$HOME/.config/JeffTheKiller/settings.conf"
 
 declare -a settingsOrder=(
   "MAX_IDLE_TIME"
+  "MAX_AUDIO_IDLE_TIME"
+  "USE_AUDIO_IDLE_FOR_SLEEP"
   "CHECK_AGAIN_EVERY"
   "ENABLE_SCREEN_SAVER"
   "SCREEN_SAVER_AFTER"
@@ -18,7 +20,9 @@ declare -a settingsOrder=(
 )
 
 declare -A settings=(
-  [MAX_IDLE_TIME]=17 #minutes
+  [MAX_IDLE_TIME]=17 #minutes (keyboard/mouse idle)
+  [MAX_AUDIO_IDLE_TIME]=0 #minutes (audio idle, 0 = same as MAX_IDLE_TIME, used for both screensaver and sleep when relevant)
+  [USE_AUDIO_IDLE_FOR_SLEEP]=true
   [CHECK_AGAIN_EVERY]=15 #seconds
   [ENABLE_SCREEN_SAVER]=true
   [ENABLE_SCREEN_LOCK]=false
@@ -29,13 +33,15 @@ declare -A settings=(
 )
 
 declare -A descriptions=(
-  [MAX_IDLE_TIME]="Maximum idle time (in minutes) before considering you AFK. System will sleep after this time if no audio is playing."
+  [MAX_IDLE_TIME]="Maximum keyboard/mouse idle time (in minutes) before considering you AFK. System will sleep after this time if audio has also been idle long enough (when USE_AUDIO_IDLE_FOR_SLEEP is true) or immediately when no audio is playing (when false)."
+  [MAX_AUDIO_IDLE_TIME]="Maximum audio idle time (in minutes) before allowing the system to sleep (when USE_AUDIO_IDLE_FOR_SLEEP is true) and before allowing the screen to turn off when SCREEN_SAVER_WITH_AUDIO is false. 0 = same as MAX_IDLE_TIME."
+  [USE_AUDIO_IDLE_FOR_SLEEP]="If true, use audio idle time (MAX_AUDIO_IDLE_TIME) as an additional requirement before suspending. If false, suspend logic only checks current audio state (backwards-compatible behavior)."
   [CHECK_AGAIN_EVERY]="Time interval (in seconds) to re-check for inactivity when you're active or audio is playing. Lower values are more responsive."
   [ENABLE_SCREEN_LOCK]="Enable screen locking before system sleep. If true, your screen locker will run before suspension."
   [SCREEN_LOCK_COMMAND]="Screen locker command. Make sure this command exists and works on your system (e.g., i3lock, slock, dm-tool lock)."
   [ENABLE_SCREEN_SAVER]="Enable screen power management. If true, your screen will turn off after specified idle time."
-  [SCREEN_SAVER_AFTER]="Minutes of inactivity before screen turns off. 0 uses default (10 minutes). Only works if ENABLE_SCREEN_SAVER is true."
-  [SCREEN_SAVER_WITH_AUDIO]="Allow screen to sleep even when audio is active. NOT recommended for media consumption! Use false unless you have specific needs."
+  [SCREEN_SAVER_AFTER]="Minutes of keyboard/mouse inactivity before screen turns off. 0 uses default (10 minutes). Only works if ENABLE_SCREEN_SAVER is true."
+  [SCREEN_SAVER_WITH_AUDIO]="If true, screen can turn off after SCREEN_SAVER_AFTER based only on keyboard/mouse idle. If false, screen will only turn off when keyboard/mouse have been idle for MAX_IDLE_TIME and audio has also been idle for MAX_AUDIO_IDLE_TIME."
   [SUSPEND_MODE]="Method to suspend system: 'dbus' (recommended, no sudo) or 'systemctl' (requires polkit rule, see README.md)."
 )
 
@@ -190,7 +196,8 @@ isAudioActive() {
 
 isAFK() {
   currentIdleTime=$(xprintidle 2>/dev/null || echo 0)
-  local idleMinutes=$(msToMin "$currentIdleTime")
+  local idleMinutes
+  idleMinutes=$(msToMin "$currentIdleTime")
   local maxIdle="${settings[MAX_IDLE_TIME]}"
 
   if ! isNumber "$maxIdle"; then
@@ -203,36 +210,61 @@ isAFK() {
 
 CHANGExsetBehaviour() {
   currentIdleTime=$(xprintidle 2>/dev/null || echo 0)
-  if [[ "${settings[ENABLE_SCREEN_SAVER]}" == "true" ]]; then
-    local time="${settings[SCREEN_SAVER_AFTER]}"
 
-    if ! isNumber "$time" || [ "$time" -eq 0 ]; then
-      time=10
-    fi
-
-    local seconds=$((time * 60))
-    local screenSaverAud=false
-    [[ "${settings[SCREEN_SAVER_WITH_AUDIO]}" == "true" ]] && screenSaverAud=true
-
-    local idleMinutes=$(msToMin "$currentIdleTime")
-    local shouldScreensave=false
-
-    if $screenSaverAud; then
-      [ "$idleMinutes" -ge "$time" ] && shouldScreensave=true
-    else
-      ! isAudioActive && [ "$idleMinutes" -ge "$time" ] && shouldScreensave=true
-    fi
-
-    if $shouldScreensave; then
-      sleep 0.5
-      xset dpms force off 2>/dev/null
-    else
-      sleep 0.5
-      xset dpms force on 2>/dev/null
-    fi
-  else
+  if [[ "${settings[ENABLE_SCREEN_SAVER]}" != "true" ]]; then
+    # Screen saver globally disabled: keep DPMS off
     sleep 0.5
     xset s off -dpms 2>/dev/null
+    return
+  fi
+
+  local time="${settings[SCREEN_SAVER_AFTER]}"
+  if ! isNumber "$time" || [ "$time" -eq 0 ]; then
+    time=10
+  fi
+
+  local idleMinutes
+  idleMinutes=$(msToMin "$currentIdleTime")
+
+  local maxIdle="${settings[MAX_IDLE_TIME]}"
+  if ! isNumber "$maxIdle"; then
+    maxIdle=17
+  fi
+
+  local maxAudioIdle="${settings[MAX_AUDIO_IDLE_TIME]}"
+  if ! isNumber "$maxAudioIdle" || [ "$maxAudioIdle" -lt 0 ]; then
+    maxAudioIdle=0
+  fi
+  if [ "$maxAudioIdle" -eq 0 ]; then
+    maxAudioIdle="$maxIdle"
+  fi
+
+  local audioIdleMinutes=0
+  if [ -n "${GLOBAL_AUDIO_IDLE_MINUTES+x}" ]; then
+    audioIdleMinutes="$GLOBAL_AUDIO_IDLE_MINUTES"
+  fi
+
+  local screenSaverAud=false
+  [[ "${settings[SCREEN_SAVER_WITH_AUDIO]}" == "true" ]] && screenSaverAud=true
+
+  local shouldScreensave=false
+
+  if $screenSaverAud; then
+    [ "$idleMinutes" -ge "$time" ] && shouldScreensave=true
+  else
+    if [ "$idleMinutes" -ge "$time" ] && \
+       [ "$idleMinutes" -ge "$maxIdle" ] && \
+       [ "$audioIdleMinutes" -ge "$maxAudioIdle" ]; then
+      shouldScreensave=true
+    fi
+  fi
+
+  if $shouldScreensave; then
+    sleep 0.5
+    xset dpms force off 2>/dev/null
+  else
+    sleep 0.5
+    xset dpms force on 2>/dev/null
   fi
 }
 
@@ -292,13 +324,52 @@ mainLoop() {
     sleep 1
   done
 
+  local lastAudioActiveTimestamp
+  lastAudioActiveTimestamp=$(date +%s)
+
   while :
   do
     currentIdleTime=$(xprintidle 2>/dev/null || echo 0)
-    if isAudioActive || ! isAFK ; then
-      checkAgain
+    local useAudioIdle="${settings[USE_AUDIO_IDLE_FOR_SLEEP]}"
+    local maxAudioIdle="${settings[MAX_AUDIO_IDLE_TIME]}"
+    if ! isNumber "$maxAudioIdle" || [ "$maxAudioIdle" -lt 0 ]; then
+      maxAudioIdle=0
+    fi
+    if [ "$maxAudioIdle" -eq 0 ]; then
+      maxAudioIdle="${settings[MAX_IDLE_TIME]}"
+      if ! isNumber "$maxAudioIdle"; then
+        maxAudioIdle=17
+      fi
+    fi
+    if isAudioActive; then
+      lastAudioActiveTimestamp=$(date +%s)
+    fi
+
+    local now
+    now=$(date +%s)
+    local audioIdleSeconds=$((now - lastAudioActiveTimestamp))
+    local audioIdleMinutes=$((audioIdleSeconds / 60))
+
+    GLOBAL_AUDIO_IDLE_MINUTES="$audioIdleMinutes"
+
+    if isAFK; then
+      if [[ "$(toLower "$useAudioIdle")" == "true" ]]; then
+        if [ "$audioIdleMinutes" -ge "$maxAudioIdle" ]; then
+          goToSleep
+          lastAudioActiveTimestamp=$(date +%s)
+        else
+          checkAgain
+        fi
+      else
+        if ! isAudioActive; then
+          goToSleep
+          lastAudioActiveTimestamp=$(date +%s)
+        else
+          checkAgain
+        fi
+      fi
     else
-      goToSleep
+      checkAgain
     fi
   done
 }
@@ -461,6 +532,8 @@ showCurrentLogic() {
   echo "================================"
 
   local maxIdle="${settings[MAX_IDLE_TIME]}"
+  local maxAudioIdle="${settings[MAX_AUDIO_IDLE_TIME]}"
+  local useAudioIdle="${settings[USE_AUDIO_IDLE_FOR_SLEEP]}"
   local checkInterval="${settings[CHECK_AGAIN_EVERY]}"
   local screenSaverEnabled="${settings[ENABLE_SCREEN_SAVER]}"
   local screenSaverTime="${settings[SCREEN_SAVER_AFTER]}"
@@ -470,24 +543,37 @@ showCurrentLogic() {
     screenSaverTime=10
   fi
 
-  echo "Sleep: Your system will suspend after $maxIdle minutes of inactivity, but ONLY if no audio is playing."
+  if ! isNumber "$maxIdle" || [ "$maxIdle" -le 0 ]; then
+    maxIdle=17
+  fi
+
+  if ! isNumber "$maxAudioIdle" || [ "$maxAudioIdle" -lt 0 ]; then
+    maxAudioIdle=0
+  fi
+  if [ "$maxAudioIdle" -eq 0 ]; then
+    maxAudioIdle="$maxIdle"
+  fi
+
+  if [[ "$(toLower "$useAudioIdle")" == "true" ]]; then
+    echo "Sleep: System will suspend when keyboard/mouse have been idle for $maxIdle minutes AND audio has also been idle for $maxAudioIdle minutes."
+  else
+    echo "Sleep: System will suspend when keyboard/mouse have been idle for $maxIdle minutes, but ONLY if no audio is playing at that moment."
+  fi
 
   if [[ "$screenSaverEnabled" == "true" ]]; then
     if [[ "$screenSaverWithAudio" == "true" ]]; then
-      echo "Screensaver: Screen will turn off after $screenSaverTime minutes of inactivity, EVEN if audio is playing."
+      echo "Screensaver: Screen will turn off after $screenSaverTime minutes of keyboard/mouse inactivity, EVEN if audio is playing."
     else
-      echo "Screensaver: Screen will turn off after $screenSaverTime minutes of inactivity, but ONLY if no audio is playing."
+      echo "Screensaver: Screen will turn off only when:"
+      echo "  - Keyboard/mouse have been idle for at least $screenSaverTime minutes,"
+      echo "  - AND keyboard/mouse have been idle for at least $maxIdle minutes,"
+      echo "  - AND audio has been idle for at least $maxAudioIdle minutes."
     fi
   else
     echo "Screensaver: Disabled (Jeff's built-in screen saver is turned off)."
   fi
 
-  echo "Idle Time: We check for inactivity every $checkInterval seconds."
-  if [[ "$screenSaverEnabled" == "true" ]]; then
-    echo "If you're inactive when we check, we'll enable the screen saver so that your screen goes to sleep after $screenSaverTime minutes."
-  else
-    echo "If you're inactive when we check, we'll monitor for the full sleep timeout ($maxIdle minutes)."
-  fi
+  echo "Idle Check Interval: Inactivity and audio state are checked every $checkInterval seconds."
 
   if [[ "${settings[ENABLE_SCREEN_LOCK]}" == "true" ]]; then
     echo "Screen Lock: Will lock before system sleep using: ${settings[SCREEN_LOCK_COMMAND]}"
@@ -506,7 +592,7 @@ showHelp() {
 
   echo "# Jeff The Killer - Sleep Manager #"
   echo "===================================="
-  echo "Prevents system sleep while audio is playing AND user is actively using the system."
+  echo "Manages screen power and system suspend based on keyboard/mouse idle time AND audio activity."
   echo ""
   echo "REQUIREMENTS:"
   echo "- X11 environment (not Wayland)"
