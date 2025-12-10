@@ -253,7 +253,6 @@ CHANGExsetBehaviour() {
     [ "$idleMinutes" -ge "$time" ] && shouldScreensave=true
   else
     if [ "$idleMinutes" -ge "$time" ] && \
-       [ "$idleMinutes" -ge "$maxIdle" ] && \
        [ "$audioIdleMinutes" -ge "$maxAudioIdle" ]; then
       shouldScreensave=true
     fi
@@ -566,7 +565,6 @@ showCurrentLogic() {
     else
       echo "Screensaver: Screen will turn off only when:"
       echo "  - Keyboard/mouse have been idle for at least $screenSaverTime minutes,"
-      echo "  - AND keyboard/mouse have been idle for at least $maxIdle minutes,"
       echo "  - AND audio has been idle for at least $maxAudioIdle minutes."
     fi
   else
