@@ -252,18 +252,17 @@ CHANGExsetBehaviour() {
   if $screenSaverAud; then
     [ "$idleMinutes" -ge "$time" ] && shouldScreensave=true
   else
-    if [ "$idleMinutes" -ge "$time" ] && \
+    if ! isAudioActive && \
+       [ "$idleMinutes" -ge "$time" ] && \
        [ "$audioIdleMinutes" -ge "$maxAudioIdle" ]; then
       shouldScreensave=true
     fi
   fi
 
+
   if $shouldScreensave; then
     sleep 0.5
     xset dpms force off 2>/dev/null
-  else
-    sleep 0.5
-    xset dpms force on 2>/dev/null
   fi
 }
 
